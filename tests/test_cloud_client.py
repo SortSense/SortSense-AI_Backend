@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from app.cloud_client import CloudClient, get_cloud_client, set_cloud_client
-from app.schemas import CloudTelemetryPayload
+from app.schemas import CloudTelemetryPayload, FillLevels, FillLevelsTelemetryPayload
 
 
 @pytest.mark.asyncio
@@ -80,6 +80,27 @@ async def test_cloud_client_network_exception():
 
     success = await client.post_waste_event(payload)
     assert success is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_cloud_client_post_fill_levels_success():
+    """Verify successful dispatch of fill levels to Cloud API."""
+    payload = FillLevelsTelemetryPayload(
+        station_id="ST-001",
+        fill_levels=FillLevels(plastic=45.0, paper=80.0, metal=20.0, general=95.0),
+    )
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).endswith("/api/telemetry/fill-levels")
+        return httpx.Response(200, json={"status": "ok", "received": True})
+
+    transport = httpx.MockTransport(mock_handler)
+    client = CloudClient(base_url="http://mock-cloud.local", max_retries=1)
+    client._client = httpx.AsyncClient(base_url="http://mock-cloud.local", transport=transport)
+
+    success = await client.post_fill_levels(payload)
+    assert success is True
     await client.close()
 
 

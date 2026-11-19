@@ -31,6 +31,7 @@ from app.detector import classify_frame, get_detector
 from app.schemas import (
     BIN_INDEX_TO_CATEGORY,
     CloudTelemetryPayload,
+    FillLevelsTelemetryPayload,
     HealthResponse,
     VerifyDropRequest,
     VerifyDropResponse,
@@ -260,6 +261,39 @@ async def verify_drop(
         status="verified",
         cloud_forwarded=True,
     )
+
+
+@app.post(
+    "/api/telemetry/fill-levels",
+    status_code=status.HTTP_200_OK,
+    tags=["Telemetry"],
+)
+async def ingest_fill_levels(
+    payload: FillLevelsTelemetryPayload,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    """Receive ToF compartment fill levels from ESP32-S3 and forward to Cloud Website API."""
+    station_id = payload.station_id
+    levels = payload.fill_levels
+
+    # Rich formatted logging in AI server console
+    lines = [f"📊 [TELEMETRY] Station: {station_id} Compartment Fill Levels:"]
+    for category in ("plastic", "paper", "metal", "general"):
+        pct = int(getattr(levels, category, 0.0))
+        filled = min(10, max(0, int(round(pct / 10.0))))
+        bar = "#" * filled + "-" * (10 - filled)
+        lines.append(f"    • {category.capitalize():<8}: [{bar}] {pct:3d}%")
+    logger.info("\n" + "\n".join(lines))
+
+    # Forward to Cloud Website API in background
+    cloud_client = get_cloud_client()
+    background_tasks.add_task(cloud_client.post_fill_levels, payload)
+
+    return {
+        "status": "ok",
+        "station_id": station_id,
+        "cloud_forwarded": True,
+    }
 
 
 def get_cache() -> dict[str, dict[str, Any]]:

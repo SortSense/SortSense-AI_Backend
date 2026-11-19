@@ -135,3 +135,35 @@ def test_verify_drop_validation_error_empty_station():
         json={"station_id": "", "bin_index": 0},
     )
     assert response.status_code == 422
+
+
+def test_ingest_fill_levels_success():
+    """Verify POST /api/telemetry/fill-levels accepts and forwards telemetry."""
+    with patch.object(get_cloud_client(), "post_fill_levels", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = True
+
+        payload = {
+            "station_id": "ST-001",
+            "fill_levels": {
+                "plastic": 45.0,
+                "paper": 80.0,
+                "metal": 20.0,
+                "general": 95.0,
+            },
+        }
+        response = client.post("/api/telemetry/fill-levels", json=payload)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["station_id"] == "ST-001"
+        assert data["cloud_forwarded"] is True
+
+
+def test_ingest_fill_levels_validation_error():
+    """Verify POST /api/telemetry/fill-levels returns 422 on invalid payload."""
+    response = client.post(
+        "/api/telemetry/fill-levels",
+        json={"station_id": ""},
+    )
+    assert response.status_code == 422

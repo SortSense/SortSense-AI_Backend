@@ -140,6 +140,36 @@ class CloudTelemetryPayload(BaseModel):
     }
 
 
+class FillLevels(BaseModel):
+    """Compartment fill levels in percentages (0-100)."""
+
+    plastic: float = Field(default=0.0, ge=0.0, le=100.0)
+    paper: float = Field(default=0.0, ge=0.0, le=100.0)
+    metal: float = Field(default=0.0, ge=0.0, le=100.0)
+    general: float = Field(default=0.0, ge=0.0, le=100.0)
+
+
+class FillLevelsTelemetryPayload(BaseModel):
+    """Payload sent by ESP32-S3 ToF sensors to POST /api/telemetry/fill-levels."""
+
+    station_id: str = Field(..., min_length=1, max_length=64, description="Station identifier")
+    fill_levels: FillLevels
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "station_id": "ST-001",
+                "fill_levels": {
+                    "plastic": 45.0,
+                    "paper": 80.0,
+                    "metal": 20.0,
+                    "general": 95.0,
+                },
+            }
+        }
+    }
+
+
 class HealthResponse(BaseModel):
     """Healthcheck response model."""
 

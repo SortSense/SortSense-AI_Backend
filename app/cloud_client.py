@@ -10,7 +10,7 @@ import os
 
 import httpx
 
-from app.schemas import CloudTelemetryPayload
+from app.schemas import CloudTelemetryPayload, FillLevelsTelemetryPayload
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,46 @@ class CloudClient:
 
         logger.error(
             f"Failed to deliver telemetry to Cloud API after {self.max_retries} attempts: {data}"
+        )
+        return False
+
+    async def post_fill_levels(self, payload: FillLevelsTelemetryPayload) -> bool:
+        """Forward compartment fill levels telemetry to SortSense Cloud Website API.
+
+        Retries with exponential backoff on transient network failures.
+        Returns:
+            True if event was successfully accepted (HTTP 2xx), False otherwise.
+        """
+        endpoint = f"{self.base_url}/api/telemetry/fill-levels"
+        data = payload.model_dump()
+        client = await self.get_client()
+
+        backoff = 0.3
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                logger.info(
+                    f"Forwarding fill-levels (attempt {attempt}/{self.max_retries}) to {endpoint}: {data}"
+                )
+                response = await client.post("/api/telemetry/fill-levels", json=data)
+
+                if 200 <= response.status_code < 300:
+                    logger.info(
+                        f"Fill-levels telemetry delivered successfully to {endpoint} (HTTP {response.status_code})"
+                    )
+                    return True
+                else:
+                    logger.warning(
+                        f"Cloud API returned HTTP {response.status_code} on attempt {attempt}: {response.text}"
+                    )
+            except (httpx.RequestError, httpx.TimeoutException) as exc:
+                logger.warning(f"Connection error reaching Cloud API on attempt {attempt}: {exc}")
+
+            if attempt < self.max_retries:
+                await asyncio.sleep(backoff)
+                backoff *= 2
+
+        logger.error(
+            f"Failed to deliver fill-levels to Cloud API after {self.max_retries} attempts: {data}"
         )
         return False
 
