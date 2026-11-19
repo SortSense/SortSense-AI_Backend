@@ -21,14 +21,20 @@ class CloudClient:
     def __init__(
         self,
         base_url: str | None = None,
-        timeout: float = 5.0,
-        max_retries: int = 3,
+        timeout: float | None = None,
+        max_retries: int | None = None,
     ) -> None:
         self.base_url = (base_url or os.getenv("CLOUD_API_URL", "http://localhost:3000")).rstrip(
             "/"
         )
-        self.timeout = float(os.getenv("CLOUD_API_TIMEOUT", str(timeout)))
-        self.max_retries = int(os.getenv("CLOUD_API_MAX_RETRIES", str(max_retries)))
+        self.timeout = (
+            float(timeout) if timeout is not None else float(os.getenv("CLOUD_API_TIMEOUT", "5.0"))
+        )
+        self.max_retries = (
+            int(max_retries)
+            if max_retries is not None
+            else int(os.getenv("CLOUD_API_MAX_RETRIES", "3"))
+        )
         self._client: httpx.AsyncClient | None = None
 
     async def get_client(self) -> httpx.AsyncClient:
