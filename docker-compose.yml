@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  sortsense-ai-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sortsense/ai-backend:latest
+    container_name: sortsense-ai-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - MODEL_BACKEND=yolov26
+      - MODEL_WEIGHTS_PATH=/app/weights/yolov26n.pt
+      - CONFIDENCE_THRESHOLD=0.50
+      - FRAME_DEBOUNCE_INTERVAL=0.15
+      - CLOUD_API_URL=http://host.docker.internal:3000
+      - CLOUD_API_TIMEOUT=5.0
+      - CLOUD_API_MAX_RETRIES=3
+    volumes:
+      - ./weights:/app/weights:ro
+      - ./dataset:/app/dataset:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
