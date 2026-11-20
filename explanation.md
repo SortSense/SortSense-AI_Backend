@@ -374,7 +374,7 @@ def classify_frame(jpeg_bytes: bytes) -> dict:
 ```
 
 - **Thread-Safe Global Singleton:** The detector instance is initialized at startup and accessed via `get_detector()` and `set_detector()`.
-- **Heuristic Bootstrap Fallback:** In `YOLOv26Detector`, if model weight files (`yolov26n-waste.pt`) are still downloading or undergoing fine-tuning, the detector seamlessly falls back to a deterministic, NumPy-accelerated color/brightness/texture heuristic. This allows hardware engineers to test the full loop without waiting for training completion.
+- **Heuristic Bootstrap Fallback:** In `YOLOv26Detector`, if model weight files (`weights/yolo26n.pt`) are still downloading or undergoing fine-tuning, the detector seamlessly falls back to a deterministic, NumPy-accelerated color/brightness/texture heuristic. This allows hardware engineers to test the full loop without waiting for training completion.
 
 ---
 
@@ -564,7 +564,7 @@ tests/
 | `PORT` | `8000` | Bind port number |
 | `DEBUG` | `false` | Enable verbose debugging and auto-reload |
 | `MODEL_BACKEND` | `yolov26` | Active vision engine: `yolov26`, `vlm`, `mock` |
-| `YOLO_WEIGHTS_PATH` | `weights/yolov26n-waste.pt` | Path to trained model weights |
+| `MODEL_WEIGHTS_PATH` | `weights/yolo26n.pt` | Path to trained model weights |
 | `CONFIDENCE_THRESHOLD` | `0.50` | Minimum confidence score to register a detection |
 | `FRAME_DEBOUNCE_INTERVAL` | `0.15` | Frame throttle window in seconds (150ms) |
 | `CLOUD_API_URL` | `http://localhost:3000` | Base URL of the SortSense-Website cloud service |
