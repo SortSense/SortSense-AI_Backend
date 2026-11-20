@@ -146,3 +146,63 @@ def test_global_detector_singleton():
     assert result["category"] == "general"
     assert result["bin_index"] == 3
     assert result["confidence"] == 0.77
+
+
+class _FakeBox:
+    def __init__(self, cls_id: int, conf: float) -> None:
+        self.cls = [cls_id]
+        self.conf = [conf]
+
+
+class _FakeResult:
+    def __init__(self, boxes: list[_FakeBox], names: dict[int, str]) -> None:
+        self.boxes = boxes
+        self.names = names
+
+
+class _FakeYOLO:
+    def __init__(self, boxes: list[_FakeBox], names: dict[int, str] | None = None) -> None:
+        self._boxes = boxes
+        self._names = names or {0: "plastic", 1: "paper", 2: "metal", 3: "general"}
+
+    def __call__(self, img, verbose: bool = False):
+        return [_FakeResult(self._boxes, self._names)]
+
+
+def test_yolov26_loaded_model_empty_frame_returns_none(tmp_path):
+    """Loaded YOLO model with 0 detections on bright frame returns 'none', not heuristic 'paper'."""
+    detector = YOLOv26Detector(weights_path=str(tmp_path / "missing.pt"), confidence_threshold=0.5)
+    detector.model = _FakeYOLO(boxes=[])
+
+    bright_white_jpeg = create_test_jpeg(640, 480, color=(255, 255, 255))
+    result = detector.classify_frame(bright_white_jpeg)
+
+    assert result["category"] == WasteCategory.NONE.value
+    assert result["bin_index"] == -1
+    assert result["confidence"] == 0.0
+
+
+def test_yolov26_loaded_model_low_confidence_returns_none(tmp_path):
+    """Loaded YOLO model with detection below threshold returns 'none' (-1)."""
+    detector = YOLOv26Detector(weights_path=str(tmp_path / "missing.pt"), confidence_threshold=0.5)
+    detector.model = _FakeYOLO(boxes=[_FakeBox(cls_id=2, conf=0.31)])
+
+    bright_white_jpeg = create_test_jpeg(640, 480, color=(255, 255, 255))
+    result = detector.classify_frame(bright_white_jpeg)
+
+    assert result["category"] == WasteCategory.NONE.value
+    assert result["bin_index"] == -1
+    assert result["confidence"] == 0.31
+
+
+def test_yolov26_loaded_model_valid_detection(tmp_path):
+    """Loaded YOLO model with above-threshold detection returns mapped bin index."""
+    detector = YOLOv26Detector(weights_path=str(tmp_path / "missing.pt"), confidence_threshold=0.5)
+    detector.model = _FakeYOLO(boxes=[_FakeBox(cls_id=2, conf=0.9234)])
+
+    jpeg_bytes = create_test_jpeg(640, 480, color=(255, 255, 255))
+    result = detector.classify_frame(jpeg_bytes)
+
+    assert result["category"] == "metal"
+    assert result["bin_index"] == 2
+    assert result["confidence"] == 0.9234

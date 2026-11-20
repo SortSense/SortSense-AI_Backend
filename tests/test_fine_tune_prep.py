@@ -55,8 +55,11 @@ def test_validate_yolo_labels(tmp_path: Path):
     assert stats["total_annotations"] == 2
 
 
-def test_train_yolov26_fallback():
-    """Verify graceful handling when ultralytics is not in test environment."""
-    result = train_yolov26(epochs=1)
-    # ultralytics is not installed in minimal CI test, returns None without crashing
+def test_train_yolov26_fallback(tmp_path: Path):
+    """Verify graceful handling when ultralytics is missing or weights/data do not exist."""
+    result = train_yolov26(
+        data_yaml=str(tmp_path / "missing_dataset.yaml"),
+        base_model=str(tmp_path / "missing_yolo26n.pt"),
+        epochs=1,
+    )
     assert result is None or isinstance(result, str)
