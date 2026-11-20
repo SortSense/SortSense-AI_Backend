@@ -59,10 +59,10 @@ def test_validate_jpeg_corrupt_data():
     assert "failed to parse" in err_msg.lower()
 
 
-def test_yolov26_detector_classify_valid_frame():
-    """Verify YOLOv26Detector returns standardized contract on valid frame."""
-    detector = YOLOv26Detector(confidence_threshold=0.5)
-    # Blue image should trigger plastic heuristic in test mode
+def test_yolov26_detector_classify_valid_frame(tmp_path):
+    """Verify YOLOv26Detector heuristic returns standardized contract on valid frame."""
+    detector = YOLOv26Detector(weights_path=str(tmp_path / "missing.pt"), confidence_threshold=0.5)
+    # Blue image should trigger plastic heuristic in simulation mode
     jpeg_bytes = create_test_jpeg(640, 480, color=(0, 0, 240))
     result = detector.classify_frame(jpeg_bytes)
 
@@ -74,9 +74,9 @@ def test_yolov26_detector_classify_valid_frame():
     assert 0.0 <= result["confidence"] <= 1.0
 
 
-def test_yolov26_detector_classify_dark_frame():
+def test_yolov26_detector_classify_dark_frame(tmp_path):
     """Verify dark/empty frame is classified as 'none' with bin_index -1."""
-    detector = YOLOv26Detector()
+    detector = YOLOv26Detector(weights_path=str(tmp_path / "missing.pt"))
     dark_jpeg = create_test_jpeg(640, 480, color=(5, 5, 5))
     result = detector.classify_frame(dark_jpeg)
 
