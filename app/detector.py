@@ -123,7 +123,7 @@ class YOLOv26Detector(BaseDetector):
         weights_path: str | None = None,
         confidence_threshold: float = 0.50,
     ) -> None:
-        self.weights_path = weights_path or os.getenv("MODEL_WEIGHTS_PATH", "weights/yolov26n.pt")
+        self.weights_path = weights_path or os.getenv("MODEL_WEIGHTS_PATH", "weights/yolo26n.pt")
         self.confidence_threshold = float(
             os.getenv("CONFIDENCE_THRESHOLD", str(confidence_threshold))
         )
@@ -166,6 +166,7 @@ class YOLOv26Detector(BaseDetector):
             try:
                 with Image.open(io.BytesIO(jpeg_bytes)) as img:
                     results = self.model(img, verbose=False)
+                    best_low_conf = 0.0
                     for r in results:
                         if hasattr(r, "boxes") and len(r.boxes) > 0:
                             # Take highest confidence box
@@ -183,10 +184,19 @@ class YOLOv26Detector(BaseDetector):
                                     "bin_index": CATEGORY_TO_BIN_INDEX[category],
                                     "confidence": round(conf, 4),
                                 }
+                            best_low_conf = max(best_low_conf, conf)
+
+                    # Loaded model found no waste (or only sub-threshold confidence): do NOT
+                    # fall through to the color heuristic, which would misclassify blank walls.
+                    return {
+                        "category": WasteCategory.NONE.value,
+                        "bin_index": -1,
+                        "confidence": round(best_low_conf, 4),
+                    }
             except Exception as exc:
                 logger.error(f"YOLO inference error: {exc}")
 
-        # Edge feature heuristic simulation (used when weights file is not present or in test suites)
+        # Edge feature heuristic simulation (used when weights file is not loaded)
         return self._heuristic_edge_classify(jpeg_bytes)
 
     def _heuristic_edge_classify(self, jpeg_bytes: bytes) -> dict[str, Any]:

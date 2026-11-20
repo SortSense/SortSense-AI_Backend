@@ -103,7 +103,7 @@ def validate_yolo_labels(labels_dir: str) -> dict[str, int]:
 
 def train_yolov26(
     data_yaml: str = "dataset.yaml",
-    base_model: str = "yolov26n.pt",
+    base_model: str = "yolo26n.pt",
     epochs: int = 50,
     imgsz: int = 640,
     batch_size: int = 16,
