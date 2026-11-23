@@ -464,22 +464,22 @@ docker compose up -d
 Every push and pull request triggers an automated GitHub Actions workflow:
 
 1. **Code Quality Stage:** Runs `ruff check .` and `ruff format --check .` to enforce PEP 8 compliance and import sorting.
-2. **Matrix Test Stage:** Executes the full 43-test suite across Python **3.11**, **3.12**, and **3.13**.
+2. **Matrix Test Stage:** Executes the full 54-test suite across Python **3.11**, **3.12**, and **3.13**.
 3. **Coverage Verification:** Verifies branch and line coverage using `pytest-cov`.
 4. **Docker Build Verification:** Builds the Docker container to ensure Dockerfile integrity.
 
 ---
 
 ### Test Suite & Quality Verification (`tests/`)
-The repository includes **43 automated unit and integration tests** across 6 test modules:
+The repository includes **54 automated unit and integration tests** across 6 test modules:
 
 ```
 tests/
-├── test_schemas.py           # 10 tests: enum validation, bin mapping, Pydantic contracts
-├── test_detector.py          # 11 tests: JPEG headers, inference, MockDetector, fallbacks
-├── test_endpoints.py         #  9 tests: /health, /internal/verify-drop, error states
-├── test_websocket.py         #  4 tests: WS binary frame ingestion, debounce, reconnects
-├── test_cloud_client.py      #  4 tests: HTTP dispatch, exponential backoff, error handling
+├── test_schemas.py           # 11 tests: enum validation, bin mapping, Pydantic contracts
+├── test_detector.py          # 18 tests: JPEG headers, YOLO26n inference, center ROI, smoothing, fallbacks
+├── test_endpoints.py         # 11 tests: /health, /internal/verify-drop, /api/telemetry/fill-levels
+├── test_websocket.py         #  5 tests: WS binary frame ingestion, debounce, smoothing, reconnects
+├── test_cloud_client.py      #  5 tests: HTTP dispatch, fill-levels forwarding, retries, error handling
 └── test_fine_tune_prep.py    #  4 tests: dataset validation, YAML generation, label checks
 ```
 
@@ -541,7 +541,25 @@ tests/
 
 ---
 
-### 4. `GET /health` (Service Monitoring)
+### 4. `POST /api/telemetry/fill-levels` (ToF Fill-Level Ingestion & Cloud Forwarding)
+- **Headers:** `Content-Type: application/json`
+- **Request Body:**
+  ```json
+  {
+    "station_id": "ST-001",
+    "fill_levels": {
+      "plastic": 72.0,
+      "paper": 35.0,
+      "metal": 15.0,
+      "general": 0.0
+    }
+  }
+  ```
+- **Behavior:** Logs live compartment fill bars in the LAN console and asynchronously forwards the payload to `POST {CLOUD_API_URL}/api/telemetry/fill-levels`.
+
+---
+
+### 5. `GET /health` (Service Monitoring)
 - **Response Body (200 OK):**
   ```json
   {
@@ -566,10 +584,12 @@ tests/
 | `MODEL_BACKEND` | `yolov26` | Active vision engine: `yolov26`, `vlm`, `mock` |
 | `MODEL_WEIGHTS_PATH` | `weights/yolo26n.pt` | Path to trained model weights |
 | `CONFIDENCE_THRESHOLD` | `0.50` | Minimum confidence score to register a detection |
+| `FOCUS_CENTER_ROI` | `true` | Restrict detections to the central handheld scan zone |
 | `FRAME_DEBOUNCE_INTERVAL` | `0.15` | Frame throttle window in seconds (150ms) |
+| `SMOOTHING_WINDOW_SIZE` | `5` | Majority-vote smoothing window across recent frames |
 | `CLOUD_API_URL` | `http://localhost:3000` | Base URL of the SortSense-Website cloud service |
-| `CLOUD_TIMEOUT_SECONDS` | `5.0` | HTTP request timeout for cloud telemetry |
-| `STATION_ID` | `ST-001` | Default station identifier |
+| `CLOUD_API_TIMEOUT` | `5.0` | HTTP request timeout for cloud telemetry |
+| `CLOUD_API_MAX_RETRIES` | `3` | Retry count with exponential backoff for cloud dispatch |
 
 ---
 
@@ -594,8 +614,9 @@ curl http://localhost:8000/health
 python -m venv .venv
 source .venv/bin/activate    # On Windows: .venv\Scripts\activate
 
-# 2. Install dependencies
+# 2. Install core dependencies + Ultralytics for trained weights/yolo26n.pt
 pip install -r requirements.txt
+pip install ultralytics
 
 # 3. Configure environment
 cp .env.example .env
@@ -606,7 +627,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 #### Option C: Executing the Test Suite
 ```bash
-# Run all 43 tests with coverage report
+# Run all 54 tests with coverage report
 pytest -v --cov=app --cov=scripts
 
 # Validate code formatting

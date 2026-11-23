@@ -249,4 +249,4 @@ After deploying `weights/yolo26n.pt`, live webcam testing revealed frame-to-fram
 To incorporate glass in the future:
 1. Combine `dataset/` (`0: plastic`, `1: paper`, `2: metal`, `3: general`) with `dataset/glass_archive/` (remapping `0: glass` → `4: glass`), or re-process `dataset/raw/GARBAGE CLASSIFICATION 3.v2-gc1.yolo26.zip` with `nc: 5`.
 2. Re-train `yolo26n.pt` on Colab.
-3. Update `WasteCategory`, `BIN_INDEX_TO_CATEGORY`, `CATEGORY_TO_BIN_INDEX`, and `VerifyDropRequest` (`le=4`) in [app/schemas.py](file:///d:/SortSense-AI_Backend/app/schemas.py) and `LABEL_TO_CATEGORY_MAP` in [app/detector.py](file:///d:/SortSense-AI_Backend/app/detector.py), plus add the 5th IR sensor/LED on `SortSense-Hardware` and `"glass"` support on `SortSense-Website`.
+3. Update `WasteCategory`, `BIN_INDEX_TO_CATEGORY`, `CATEGORY_TO_BIN_INDEX`, and `VerifyDropRequest` (`le=4`) in [app/schemas.py](app/schemas.py) and `LABEL_TO_CATEGORY_MAP` in [app/detector.py](app/detector.py), plus add the 5th IR sensor/LED on `SortSense-Hardware` and `"glass"` support on `SortSense-Website`.
