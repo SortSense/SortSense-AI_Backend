@@ -11,49 +11,49 @@ Supports:
    confidence score, payload size, latency, and FPS.
 """
 
-import os
-import sys
-from pathlib import Path
-
-# Automatically switch to project virtual environment if available
-_VENV_PYTHON = Path(__file__).resolve().parent.parent / ".venv" / "bin" / "python"
-if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
-    os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON)] + sys.argv)
-
 import argparse
 import asyncio
 import io
 import json
+import os
+import sys
 import time
+from pathlib import Path
 
-import cv2
-import numpy as np
-from PIL import Image
+# Automatically switch to project virtual environment if available (Windows & POSIX)
+_VENV_DIR = Path(__file__).resolve().parent.parent / ".venv"
+_VENV_PYTHON = _VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+if _VENV_PYTHON.exists() and Path(sys.executable).resolve() != _VENV_PYTHON.resolve():
+    os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON)] + sys.argv)
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+from PIL import Image  # noqa: E402
 
 # Ensure repository root is on sys.path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.detector import classify_frame, get_detector
-from app.schemas import CATEGORY_TO_BIN_INDEX, WasteCategory
+from app.detector import PredictionSmoother, classify_frame, get_detector  # noqa: E402
+from app.schemas import WasteCategory  # noqa: E402
 
 # Color mappings (BGR format for OpenCV drawing)
 BIN_COLORS_BGR = {
-    WasteCategory.PLASTIC: (255, 128, 0),     # Blue
-    WasteCategory.PAPER: (0, 200, 0),         # Green
-    WasteCategory.METAL: (0, 215, 255),       # Yellow/Gold
-    WasteCategory.GENERAL: (255, 255, 255),   # White
-    WasteCategory.NONE: (200, 200, 200),      # Soft Gray/Cyan
+    WasteCategory.PLASTIC: (255, 128, 0),  # Blue
+    WasteCategory.PAPER: (0, 200, 0),  # Green
+    WasteCategory.METAL: (0, 215, 255),  # Yellow/Gold
+    WasteCategory.GENERAL: (255, 255, 255),  # White
+    WasteCategory.NONE: (200, 200, 200),  # Soft Gray/Cyan
 }
 
 # Terminal ANSI color codes for headless / console mode
 ANSI_COLORS = {
-    WasteCategory.PLASTIC: "\033[94m",   # Blue
-    WasteCategory.PAPER: "\033[92m",     # Green
-    WasteCategory.METAL: "\033[93m",     # Yellow
-    WasteCategory.GENERAL: "\033[97m",   # White
-    WasteCategory.NONE: "\033[90m",      # Gray
+    WasteCategory.PLASTIC: "\033[94m",  # Blue
+    WasteCategory.PAPER: "\033[92m",  # Green
+    WasteCategory.METAL: "\033[93m",  # Yellow
+    WasteCategory.GENERAL: "\033[97m",  # White
+    WasteCategory.NONE: "\033[90m",  # Gray
 }
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
@@ -65,10 +65,12 @@ def encode_frame_esp32_format(
     target_height: int,
     jpeg_quality: int,
 ) -> tuple[bytes, np.ndarray]:
-    """Resize and compress a frame to match the exact ESP32-S3 OV5640 pipeline.
+    """Resize and compress a frame to match the ESP32-S3 OV5640 JPEG pipeline.
 
-    The ESP32-S3 captures in native YUV422 format and uses `frame2jpg` in PSRAM
-    with `CAM_JPEG_QUALITY` (default 12) before network transmission.
+    Note on JPEG quality scales:
+    ESP32 `frame2jpg` (`CAM_JPEG_QUALITY=12`) uses an inverted 0-63 scale where
+    lower = sharper (~80-85% standard quality). Python Pillow uses the standard
+    1-95 scale where higher = sharper, so Pillow `quality=80` matches ESP32 `12`.
     """
     # Resize to target camera resolution
     resized = cv2.resize(bgr_frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
@@ -77,12 +79,123 @@ def encode_frame_esp32_format(
     rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(rgb)
 
-    # Encode to JPEG bytes using the identical quality setting
+    # Encode to JPEG bytes
     buf = io.BytesIO()
     pil_img.save(buf, format="JPEG", quality=jpeg_quality)
     jpeg_bytes = buf.getvalue()
 
-    return jpeg_bytes, resized
+    # Decode compressed JPEG for preview so the HUD shows exactly what YOLO sees
+    decoded = cv2.imdecode(np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    preview_bgr = decoded if decoded is not None else resized
+
+    return jpeg_bytes, preview_bgr
+
+
+class BoxSmoother:
+    """EMA smoother for the primary handheld bounding box to eliminate visual jitter."""
+
+    def __init__(self, alpha: float = 0.35, hold_frames: int = 3) -> None:
+        self.alpha = alpha
+        self.hold_frames = hold_frames
+        self._xyxy: list[float] | None = None
+        self._missed = 0
+
+    def update(self, primary_det: dict | None, active_category: str) -> list[float] | None:
+        """Update smoothed coordinates; holds briefly across 1-2 dropped frames."""
+        if active_category == WasteCategory.NONE.value:
+            self._xyxy = None
+            self._missed = 0
+            return None
+
+        xyxy = primary_det.get("xyxy") if primary_det else None
+        if xyxy and len(xyxy) == 4:
+            self._missed = 0
+            if self._xyxy is None:
+                self._xyxy = [float(v) for v in xyxy]
+            else:
+                a = self.alpha
+                self._xyxy = [a * float(n) + (1.0 - a) * p for n, p in zip(xyxy, self._xyxy)]
+            return self._xyxy
+
+        self._missed += 1
+        if self._xyxy is not None and self._missed <= self.hold_frames:
+            return self._xyxy
+
+        self._xyxy = None
+        return None
+
+
+def draw_scan_zone_guide(
+    frame: np.ndarray,
+    roi_bounds: tuple[float, float, float, float],
+    active: bool,
+) -> np.ndarray:
+    """Draw subtle corner brackets showing the center handheld scan zone."""
+    h, w, _ = frame.shape
+    rx1, ry1, rx2, ry2 = roi_bounds
+    x1, y1, x2, y2 = int(rx1 * w), int(ry1 * h), int(rx2 * w), int(ry2 * h)
+    corner_len = 22
+    color = (110, 230, 140) if active else (150, 150, 150)
+    thickness = 2
+
+    # 4 clean viewfinder corner brackets
+    cv2.line(frame, (x1, y1), (x1 + corner_len, y1), color, thickness)
+    cv2.line(frame, (x1, y1), (x1, y1 + corner_len), color, thickness)
+    cv2.line(frame, (x2, y1), (x2 - corner_len, y1), color, thickness)
+    cv2.line(frame, (x2, y1), (x2, y1 + corner_len), color, thickness)
+    cv2.line(frame, (x1, y2), (x1 + corner_len, y2), color, thickness)
+    cv2.line(frame, (x1, y2), (x1, y2 - corner_len), color, thickness)
+    cv2.line(frame, (x2, y2), (x2 - corner_len, y2), color, thickness)
+    cv2.line(frame, (x2, y2), (x2, y2 - corner_len), color, thickness)
+
+    if not active:
+        cv2.putText(
+            frame,
+            "HOLD ITEM INSIDE FRAME",
+            (x1 + 10, y2 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (180, 180, 180),
+            1,
+            cv2.LINE_AA,
+        )
+    return frame
+
+
+def draw_primary_box(
+    frame: np.ndarray,
+    smooth_xyxy: list[float] | None,
+    category_name: str,
+    confidence: float,
+) -> np.ndarray:
+    """Draw only the single smoothed foreground object bounding box."""
+    if not smooth_xyxy or category_name == WasteCategory.NONE.value:
+        return frame
+
+    x1, y1, x2, y2 = (int(round(v)) for v in smooth_xyxy)
+    try:
+        cat_enum = WasteCategory(category_name)
+    except ValueError:
+        cat_enum = WasteCategory.NONE
+
+    color = BIN_COLORS_BGR.get(cat_enum, (200, 200, 200))
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+    label = f"{category_name.upper()} {int(confidence * 100)}%"
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+    label_y = max(92 + th, y1 - 6)
+    cv2.rectangle(frame, (x1, label_y - th - 6), (x1 + tw + 10, label_y + 4), color, -1)
+    cv2.putText(
+        frame,
+        label,
+        (x1 + 5, label_y - 2),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (20, 20, 20),
+        2,
+        cv2.LINE_AA,
+    )
+    return frame
 
 
 def draw_hud_overlay(
@@ -244,18 +357,30 @@ def run_direct_mode(
     jpeg_quality: int,
     no_gui: bool,
     max_frames: int | None = None,
+    smooth_window: int = 5,
+    full_frame: bool = False,
 ) -> None:
     """Run camera inference directly against in-process classifier."""
     print("=" * 70)
     print("SortSense AI Webcam Test (Direct In-Process Mode)")
     print(f"Target Camera Resolution : {target_width}x{target_height}")
-    print(f"JPEG Quality Compression : {jpeg_quality} (matches ESP32 CAM_JPEG_QUALITY)")
+    print(f"JPEG Quality (Pillow)    : {jpeg_quality} (80 ~= ESP32 CAM_JPEG_QUALITY 12)")
+    print(f"Temporal Smoothing       : {smooth_window}-frame majority vote")
+    print(f"Handheld Center Focus    : {'OFF (full frame)' if full_frame else 'ON (center zone)'}")
     print(f"Camera Device Index      : {camera_index}")
     print("=" * 70)
 
     detector = get_detector()
+    if hasattr(detector, "focus_center_roi"):
+        detector.focus_center_roi = not full_frame
     backend_name = type(detector).__name__
+    model_loaded = getattr(detector, "model", None) is not None
+    weights_path = getattr(detector, "weights_path", "N/A")
     print(f"Active Vision Backend: {backend_name}")
+    if model_loaded:
+        print(f"Model Weights Loaded : {weights_path}")
+    else:
+        print("WARNING: No YOLO weights loaded — running fallback color heuristic!")
     print("Starting webcam capture... Press 'q' or Ctrl+C to exit.\n")
 
     cap = cv2.VideoCapture(camera_index)
@@ -271,6 +396,9 @@ def run_direct_mode(
     last_time = time.monotonic()
     frame_count = 0
     fps = 0.0
+    smoother = PredictionSmoother(window_size=smooth_window)
+    box_smoother = BoxSmoother(alpha=0.35, hold_frames=3)
+    smooth_box: list[float] | None = None
 
     last_prediction = {
         "category": WasteCategory.NONE.value,
@@ -298,9 +426,14 @@ def run_direct_mode(
                 )
                 last_jpeg_len = len(jpeg_bytes)
 
-                # Run inference
+                # Run inference + temporal smoothing
                 t0 = time.monotonic()
-                last_prediction = classify_frame(jpeg_bytes)
+                raw_prediction = classify_frame(jpeg_bytes)
+                last_prediction = smoother.update(raw_prediction)
+                smooth_box = box_smoother.update(
+                    getattr(detector, "last_primary_detection", None),
+                    last_prediction["category"],
+                )
                 t1 = time.monotonic()
                 last_latency = (t1 - t0) * 1000.0
 
@@ -323,8 +456,22 @@ def run_direct_mode(
                 )
                 time.sleep(0.03)
             else:
+                preview = resized_frame.copy()
+                roi_bounds = getattr(detector, "roi_bounds", (0.18, 0.18, 0.82, 0.88))
+                if not full_frame:
+                    draw_scan_zone_guide(
+                        preview,
+                        roi_bounds,
+                        active=last_prediction["category"] != WasteCategory.NONE.value,
+                    )
+                draw_primary_box(
+                    preview,
+                    smooth_box,
+                    last_prediction["category"],
+                    float(last_prediction["confidence"]),
+                )
                 annotated = draw_hud_overlay(
-                    resized_frame,
+                    preview,
                     last_prediction["category"],
                     int(last_prediction["bin_index"]),
                     float(last_prediction["confidence"]),
@@ -502,8 +649,19 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--quality",
         type=int,
-        default=12,
-        help="JPEG quality factor (matches ESP32 CAM_JPEG_QUALITY in config.h).",
+        default=80,
+        help="Pillow JPEG quality (1-95, higher=sharper; 80 matches ESP32 CAM_JPEG_QUALITY=12).",
+    )
+    parser.add_argument(
+        "--smooth",
+        type=int,
+        default=5,
+        help="Temporal majority-vote window size in direct mode (1 disables smoothing).",
+    )
+    parser.add_argument(
+        "--full-frame",
+        action="store_true",
+        help="Disable center handheld scan zone and detect across the entire frame.",
     )
     parser.add_argument(
         "--ws-url",
@@ -537,6 +695,8 @@ def main() -> None:
             jpeg_quality=args.quality,
             no_gui=args.no_gui,
             max_frames=args.frames,
+            smooth_window=args.smooth,
+            full_frame=args.full_frame,
         )
     elif args.mode == "ws":
         asyncio.run(
