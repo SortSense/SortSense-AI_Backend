@@ -27,7 +27,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.cloud_client import get_cloud_client
-from app.detector import classify_frame, get_detector
+from app.detector import PredictionSmoother, classify_frame, get_detector
 from app.schemas import (
     BIN_INDEX_TO_CATEGORY,
     CloudTelemetryPayload,
@@ -55,6 +55,9 @@ station_prediction_cache: dict[str, dict[str, Any]] = {}
 
 # Frame debounce interval in seconds (prevents frame spamming & LED flicker)
 FRAME_DEBOUNCE_INTERVAL = float(os.getenv("FRAME_DEBOUNCE_INTERVAL", "0.15"))
+
+# Sliding-window majority-vote size for temporal smoothing on /ws/vision
+SMOOTHING_WINDOW_SIZE = max(1, int(os.getenv("SMOOTHING_WINDOW_SIZE", "5")))
 
 
 @asynccontextmanager
@@ -135,6 +138,7 @@ async def vision_websocket(
 
     last_inference_time = 0.0
     last_response: dict[str, Any] | None = None
+    smoother = PredictionSmoother(window_size=SMOOTHING_WINDOW_SIZE)
 
     try:
         while True:
@@ -151,8 +155,9 @@ async def vision_websocket(
                     await websocket.send_json(last_response)
                     continue
 
-                # Run classification via pluggable detector interface
-                result = classify_frame(jpeg_bytes)
+                # Run classification via pluggable detector interface and smooth temporally
+                raw_result = classify_frame(jpeg_bytes)
+                result = smoother.update(raw_result)
                 last_inference_time = now
 
                 # Construct validated response

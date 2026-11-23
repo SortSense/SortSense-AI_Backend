@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+from collections import deque
 from typing import Any
 
 import numpy as np
@@ -122,12 +123,37 @@ class YOLOv26Detector(BaseDetector):
         self,
         weights_path: str | None = None,
         confidence_threshold: float = 0.50,
+        focus_center_roi: bool | None = None,
+        min_box_area_ratio: float | None = None,
+        max_box_area_ratio: float | None = None,
     ) -> None:
         self.weights_path = weights_path or os.getenv("MODEL_WEIGHTS_PATH", "weights/yolo26n.pt")
         self.confidence_threshold = float(
             os.getenv("CONFIDENCE_THRESHOLD", str(confidence_threshold))
         )
+        if focus_center_roi is not None:
+            self.focus_center_roi = focus_center_roi
+        else:
+            self.focus_center_roi = os.getenv("FOCUS_CENTER_ROI", "true").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+        self.min_box_area_ratio = (
+            min_box_area_ratio
+            if min_box_area_ratio is not None
+            else float(os.getenv("MIN_BOX_AREA_RATIO", "0.015"))
+        )
+        self.max_box_area_ratio = (
+            max_box_area_ratio
+            if max_box_area_ratio is not None
+            else float(os.getenv("MAX_BOX_AREA_RATIO", "0.85"))
+        )
+        # Center scan zone bounds (normalized x1, y1, x2, y2) for handheld foreground focus
+        self.roi_bounds: tuple[float, float, float, float] = (0.18, 0.18, 0.82, 0.88)
         self.model = None
+        self.last_detections: list[dict[str, Any]] = []
+        self.last_primary_detection: dict[str, Any] | None = None
         self._initialize_model()
 
     def _initialize_model(self) -> None:
@@ -150,8 +176,51 @@ class YOLOv26Detector(BaseDetector):
                 "Running YOLOv26 edge simulation classifier (ready for inference/tests)."
             )
 
+    def _score_detection(
+        self,
+        conf: float,
+        xyxy: list[float] | None,
+        img_size: tuple[int, int] | None,
+    ) -> tuple[bool, float]:
+        """Evaluate whether a detection is a valid foreground handheld object and score it.
+
+        Returns:
+            (is_in_focus, priority_score)
+        """
+        if not self.focus_center_roi or xyxy is None or not img_size:
+            return True, conf
+
+        img_w, img_h = img_size
+        if img_w <= 0 or img_h <= 0:
+            return True, conf
+
+        x1, y1, x2, y2 = xyxy
+        box_w = max(0.0, x2 - x1)
+        box_h = max(0.0, y2 - y1)
+        area_ratio = (box_w * box_h) / float(img_w * img_h)
+
+        # Reject tiny distant background specks or full-frame wall/shirt false positives
+        if area_ratio < self.min_box_area_ratio or area_ratio > self.max_box_area_ratio:
+            return False, 0.0
+
+        # Check whether the detection center sits inside the center scan zone
+        cx = ((x1 + x2) / 2.0) / float(img_w)
+        cy = ((y1 + y2) / 2.0) / float(img_h)
+        rx1, ry1, rx2, ry2 = self.roi_bounds
+        if not (rx1 <= cx <= rx2 and ry1 <= cy <= ry2):
+            return False, 0.0
+
+        # Prioritize large, centered foreground items over peripheral clutter
+        dist_from_center = ((cx - 0.5) ** 2 + (cy - 0.5) ** 2) ** 0.5
+        center_weight = max(0.0, 1.0 - dist_from_center / 0.5)
+        size_weight = min(1.0, area_ratio / 0.20)
+        priority = conf * (0.65 + 0.35 * center_weight) * (0.75 + 0.25 * size_weight)
+        return True, priority
+
     def classify_frame(self, jpeg_bytes: bytes) -> dict[str, Any]:
         """Classify a 640x480 JPEG frame using YOLOv26."""
+        self.last_detections = []
+        self.last_primary_detection = None
         is_valid, err_msg, dims = validate_jpeg(jpeg_bytes)
         if not is_valid:
             logger.warning(f"Invalid frame received: {err_msg}")
@@ -165,28 +234,56 @@ class YOLOv26Detector(BaseDetector):
         if self.model is not None:
             try:
                 with Image.open(io.BytesIO(jpeg_bytes)) as img:
+                    img_size = img.size  # (width, height)
                     results = self.model(img, verbose=False)
                     best_low_conf = 0.0
+                    best_primary: dict[str, Any] | None = None
+                    best_priority = -1.0
+
                     for r in results:
                         if hasattr(r, "boxes") and len(r.boxes) > 0:
-                            # Take highest confidence box
-                            top_box = sorted(r.boxes, key=lambda b: float(b.conf[0]), reverse=True)[
-                                0
-                            ]
-                            conf = float(top_box.conf[0])
-                            cls_id = int(top_box.cls[0])
-                            raw_label = r.names.get(cls_id, "unknown").lower()
-                            category = LABEL_TO_CATEGORY_MAP.get(raw_label, WasteCategory.GENERAL)
-
-                            if conf >= self.confidence_threshold:
-                                return {
-                                    "category": category.value,
-                                    "bin_index": CATEGORY_TO_BIN_INDEX[category],
-                                    "confidence": round(conf, 4),
+                            for b in r.boxes:
+                                b_conf = float(b.conf[0])
+                                b_cls = int(b.cls[0])
+                                b_raw = r.names.get(b_cls, "unknown").lower()
+                                b_cat = LABEL_TO_CATEGORY_MAP.get(b_raw, WasteCategory.GENERAL)
+                                xyxy = (
+                                    [float(v) for v in b.xyxy[0].tolist()]
+                                    if hasattr(b, "xyxy") and len(b.xyxy) > 0
+                                    else None
+                                )
+                                in_focus, priority = self._score_detection(b_conf, xyxy, img_size)
+                                det_info = {
+                                    "xyxy": xyxy,
+                                    "raw_label": b_raw,
+                                    "category": b_cat.value,
+                                    "bin_index": CATEGORY_TO_BIN_INDEX[b_cat],
+                                    "confidence": round(b_conf, 4),
+                                    "above_threshold": b_conf >= self.confidence_threshold,
+                                    "in_focus": in_focus,
+                                    "priority": round(priority, 4),
                                 }
-                            best_low_conf = max(best_low_conf, conf)
+                                self.last_detections.append(det_info)
 
-                    # Loaded model found no waste (or only sub-threshold confidence): do NOT
+                                if in_focus:
+                                    if (
+                                        b_conf >= self.confidence_threshold
+                                        and priority > best_priority
+                                    ):
+                                        best_priority = priority
+                                        best_primary = det_info
+                                    elif b_conf < self.confidence_threshold:
+                                        best_low_conf = max(best_low_conf, b_conf)
+
+                    if best_primary is not None:
+                        self.last_primary_detection = best_primary
+                        return {
+                            "category": best_primary["category"],
+                            "bin_index": best_primary["bin_index"],
+                            "confidence": best_primary["confidence"],
+                        }
+
+                    # Loaded model found no focused waste above threshold: do NOT
                     # fall through to the color heuristic, which would misclassify blank walls.
                     return {
                         "category": WasteCategory.NONE.value,
@@ -449,6 +546,42 @@ def set_detector(detector: BaseDetector) -> None:
     """Set custom detector instance (useful for testing)."""
     global _GLOBAL_DETECTOR
     _GLOBAL_DETECTOR = detector
+
+
+class PredictionSmoother:
+    """Sliding-window majority-vote smoother to prevent frame-to-frame flicker.
+
+    Maintains the last `window_size` predictions and outputs the category with the
+    most votes (ties break toward the most recent frame so real object changes
+    remain responsive while isolated single-frame glitches are filtered out).
+    """
+
+    def __init__(self, window_size: int = 5) -> None:
+        self.window_size = max(1, int(window_size))
+        self._history: deque[dict[str, Any]] = deque(maxlen=self.window_size)
+
+    def reset(self) -> None:
+        """Clear prediction history."""
+        self._history.clear()
+
+    def update(self, prediction: dict[str, Any]) -> dict[str, Any]:
+        """Record a raw prediction and return the temporally smoothed prediction."""
+        if self.window_size <= 1:
+            return dict(prediction)
+
+        self._history.append(dict(prediction))
+
+        counts: dict[str, int] = {}
+        latest_idx: dict[str, int] = {}
+        latest_pred: dict[str, dict[str, Any]] = {}
+        for idx, item in enumerate(self._history):
+            cat = str(item["category"])
+            counts[cat] = counts.get(cat, 0) + 1
+            latest_idx[cat] = idx
+            latest_pred[cat] = item
+
+        winner = max(counts.keys(), key=lambda c: (counts[c], latest_idx[c]))
+        return dict(latest_pred[winner])
 
 
 def classify_frame(jpeg_bytes: bytes) -> dict[str, Any]:
