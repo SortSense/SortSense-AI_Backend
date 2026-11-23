@@ -7,6 +7,7 @@ from PIL import Image
 from app.detector import (
     LABEL_TO_CATEGORY_MAP,
     MockDetector,
+    PredictionSmoother,
     VisionLLMDetector,
     YOLOv26Detector,
     classify_frame,
@@ -149,9 +150,13 @@ def test_global_detector_singleton():
 
 
 class _FakeBox:
-    def __init__(self, cls_id: int, conf: float) -> None:
+    def __init__(self, cls_id: int, conf: float, xyxy: list[float] | None = None) -> None:
         self.cls = [cls_id]
         self.conf = [conf]
+        if xyxy is not None:
+            import numpy as np
+
+            self.xyxy = [np.array(xyxy, dtype=float)]
 
 
 class _FakeResult:
@@ -206,3 +211,79 @@ def test_yolov26_loaded_model_valid_detection(tmp_path):
     assert result["category"] == "metal"
     assert result["bin_index"] == 2
     assert result["confidence"] == 0.9234
+    assert len(detector.last_detections) == 1
+    assert detector.last_detections[0]["above_threshold"] is True
+
+
+def test_prediction_smoother_filters_glitches_and_transitions():
+    """Verify PredictionSmoother filters isolated glitches but transitions on sustained change."""
+    smoother = PredictionSmoother(window_size=5)
+    plastic = {"category": "plastic", "bin_index": 0, "confidence": 0.88}
+    glitch = {"category": "metal", "bin_index": 2, "confidence": 0.55}
+    metal = {"category": "metal", "bin_index": 2, "confidence": 0.91}
+
+    # First 3 frames lock in plastic
+    assert smoother.update(plastic)["category"] == "plastic"
+    assert smoother.update(plastic)["category"] == "plastic"
+    assert smoother.update(plastic)["category"] == "plastic"
+
+    # Single glitch frame should NOT flicker to metal (3 plastic vs 1 metal)
+    out = smoother.update(glitch)
+    assert out["category"] == "plastic"
+    assert out["bin_index"] == 0
+
+    # Sustained metal frames should cleanly transition once metal holds majority (3 vs 2)
+    assert smoother.update(metal)["category"] == "plastic"  # 3 plastic vs 2 metal
+    assert smoother.update(metal)["category"] == "metal"  # 2 plastic vs 3 metal
+    assert smoother.update(metal)["confidence"] == 0.91
+
+
+def test_prediction_smoother_disabled_window_one():
+    """Verify window_size=1 passes predictions straight through without smoothing."""
+    smoother = PredictionSmoother(window_size=1)
+    assert (
+        smoother.update({"category": "plastic", "bin_index": 0, "confidence": 0.9})["category"]
+        == "plastic"
+    )
+    assert (
+        smoother.update({"category": "metal", "bin_index": 2, "confidence": 0.8})["category"]
+        == "metal"
+    )
+
+
+def test_yolov26_center_roi_ignores_corner_and_tiny_background(tmp_path):
+    """Center ROI ignores peripheral corner items and tiny specks, prioritizing handheld center."""
+    detector = YOLOv26Detector(
+        weights_path=str(tmp_path / "missing.pt"),
+        confidence_threshold=0.5,
+        focus_center_roi=True,
+    )
+    # 640x480 frame: corner paper (high conf 0.95 at top-left corner),
+    # tiny speck in center (<1.5% area), and held metal can in center (conf 0.80, ~25% area)
+    corner_paper = _FakeBox(cls_id=1, conf=0.95, xyxy=[5, 5, 90, 90])
+    tiny_speck = _FakeBox(cls_id=3, conf=0.92, xyxy=[310, 230, 330, 250])
+    held_can = _FakeBox(cls_id=2, conf=0.80, xyxy=[200, 120, 440, 380])
+    detector.model = _FakeYOLO(boxes=[corner_paper, tiny_speck, held_can])
+
+    result = detector.classify_frame(create_test_jpeg(640, 480))
+    assert result["category"] == "metal"
+    assert result["bin_index"] == 2
+    assert result["confidence"] == 0.8
+    assert detector.last_primary_detection is not None
+    assert detector.last_primary_detection["category"] == "metal"
+
+
+def test_yolov26_center_roi_rejects_full_frame_wall_box(tmp_path):
+    """Center ROI ignores giant >85% frame boxes (wall/shirt false positives)."""
+    detector = YOLOv26Detector(
+        weights_path=str(tmp_path / "missing.pt"),
+        confidence_threshold=0.5,
+        focus_center_roi=True,
+    )
+    wall_box = _FakeBox(cls_id=1, conf=0.88, xyxy=[0, 0, 635, 475])
+    detector.model = _FakeYOLO(boxes=[wall_box])
+
+    result = detector.classify_frame(create_test_jpeg(640, 480))
+    assert result["category"] == WasteCategory.NONE.value
+    assert result["bin_index"] == -1
+    assert detector.last_primary_detection is None

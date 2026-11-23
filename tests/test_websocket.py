@@ -93,3 +93,23 @@ def test_websocket_vision_debounce():
         resp2 = websocket.receive_json()
 
         assert resp1 == resp2
+
+
+def test_websocket_vision_temporal_smoothing_blocks_single_glitch():
+    """Verify single noisy glitch frame does not flip steady WebSocket prediction."""
+    jpeg_bytes = create_jpeg_bytes()
+
+    with client.websocket_connect("/ws/vision?station_id=ST-SMOOTH") as websocket:
+        # 3 steady plastic frames
+        for _ in range(3):
+            websocket.send_bytes(jpeg_bytes)
+            r = websocket.receive_json()
+            assert r["category"] == "plastic"
+            time.sleep(0.17)
+
+        # Single glitch frame flips detector to 'none'
+        set_detector(MockDetector(category=WasteCategory.NONE, confidence=0.1))
+        websocket.send_bytes(jpeg_bytes)
+        r_glitch = websocket.receive_json()
+        assert r_glitch["category"] == "plastic"
+        assert r_glitch["bin_index"] == 0
