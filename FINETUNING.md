@@ -189,8 +189,10 @@ Because local PyTorch on the development laptop is CPU-only (`torch.cuda.is_avai
    MODEL_BACKEND=yolov26
    MODEL_WEIGHTS_PATH=weights/yolo26n.pt
    CONFIDENCE_THRESHOLD=0.50
+   FOCUS_CENTER_ROI=true
+   SMOOTHING_WINDOW_SIZE=5
    ```
-   *(Note: `.pt` files inside `weights/` are ignored by `.gitignore`, so keep your trained weights backed up on Google Drive.)*
+   *(Note: `.gitignore` ignores all `.pt`/`.onnx`/`.engine` files **except** `!weights/yolo26n.pt`, so our 5.2 MB fine-tuned model is tracked directly in Git for teammates while still keeping a backup on Google Drive.)*
 
 3. **Empty-Frame / Low-Confidence Handling (`app/detector.py`):**
    * When trained weights are loaded (`self.model is not None`), if YOLO detects **0 objects** or detections below `CONFIDENCE_THRESHOLD` (`0.50`), `YOLOv26Detector.classify_frame()` returns `{"category": "none", "bin_index": -1, "confidence": ...}` so blank bin backgrounds do not trigger false LEDs.
@@ -212,7 +214,37 @@ Because local PyTorch on the development laptop is CPU-only (`torch.cuda.is_avai
 
 ---
 
-## 7. Future Expansion: Adding `glass` (5th Bin)
+## 7. Post-Training Inference Optimizations & Live Webcam Verification
+
+After deploying `weights/yolo26n.pt`, live webcam testing revealed frame-to-frame prediction flickering, background clutter detections, and JPEG compression artifacts. We applied four targeted optimizations (verified by **54 passing pytest tests** and green GitHub Actions CI):
+
+1. **Temporal Majority-Vote Smoothing (`PredictionSmoother` in `app/detector.py` & `app/main.py`):**
+   * Added a **5-frame sliding-window majority vote** (`SMOOTHING_WINDOW_SIZE=5` in `.env`), applied to both `WS /ws/vision` and `scripts/test_webcam.py` (`--smooth 5`).
+   * Isolated 1–2 frame glitches no longer flip the HUD or ESP32 LEDs, ties break toward the most recent frame, and genuine item changes (or removing an item) transition cleanly after 3 consistent frames.
+
+2. **Handheld Center Scan Zone & Foreground Filtering (`app/detector.py`):**
+   * Enabled `FOCUS_CENTER_ROI=true` by default:
+     * Restricts active detections to items centered inside the central scan zone (`18%–82%` width, `18%–88%` height).
+     * Rejects tiny distant specks (`< 1.5%` frame area, `MIN_BOX_AREA_RATIO=0.015`) and full-frame wall/shirt false positives (`> 85%` frame area, `MAX_BOX_AREA_RATIO=0.85`).
+     * Scores valid boxes by **confidence × center proximity × foreground size**, ensuring the handheld foreground object beats peripheral clutter.
+
+3. **Webcam Testing Tool Fixes & Smooth Viewfinder (`scripts/test_webcam.py`):**
+   * **Fixed Inverted JPEG Quality Scale:** ESP32 `frame2jpg` (`CAM_JPEG_QUALITY=12`) uses an inverted `0–63` scale (lower = sharper ≈ 80–85% standard quality), whereas Pillow `quality=12` severely degraded frames into blocky artifacts. Updated default `--quality` from `12` → **`80`** and decoded the actual compressed JPEG for the preview window so you see exactly what YOLO receives.
+   * **Smooth Single-Box HUD (`BoxSmoother`):** Removed noisy low-confidence background boxes; the preview draws viewfinder corner brackets (`HOLD ITEM INSIDE FRAME`) and only the single winning foreground box smoothed via Exponential Moving Average (`alpha=0.35`, `hold_frames=3`).
+   * **Windows `.venv` Auto-Switch & CLI Flags:** Fixed `.venv/Scripts/python.exe` auto-switching on Windows, added startup confirmation of loaded weights vs. heuristic fallback, added `--smooth` and `--full-frame` CLI options, and resolved `ruff` `E402` lint errors.
+   * **Run live webcam verification:**
+     ```powershell
+     cd D:\SortSense-AI_Backend
+     .venv\Scripts\python scripts/test_webcam.py
+     ```
+
+4. **Known Dataset Limitations & Next Accuracy Iteration:**
+   * `GARBAGE CLASSIFICATION 3` contains **0 negative/background images** (`0 backgrounds` in test scan), mostly stock trash piles rather than handheld indoor views, and its `general` class is purely `BIODEGRADABLE` (missing campus general trash like tissues, boba cups, and snack wrappers).
+   * **Next planned improvement:** Capture ~30–40 real handheld campus items per class (using `'s'` snapshot in `scripts/test_webcam.py` or ESP32 OV5640 frames) plus ~50–80 empty/hand-only negative background frames (empty `.txt` labels), then run a 20–30 epoch transfer-learning pass starting from `weights/yolo26n.pt`.
+
+---
+
+## 8. Future Expansion: Adding `glass` (5th Bin)
 
 To incorporate glass in the future:
 1. Combine `dataset/` (`0: plastic`, `1: paper`, `2: metal`, `3: general`) with `dataset/glass_archive/` (remapping `0: glass` → `4: glass`), or re-process `dataset/raw/GARBAGE CLASSIFICATION 3.v2-gc1.yolo26.zip` with `nc: 5`.
