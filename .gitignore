@@ -48,6 +48,7 @@ weights/*.onnx
 *.pt
 *.onnx
 *.engine
+!weights/yolo26n.pt
 dataset/
 
 # OS & Editor
